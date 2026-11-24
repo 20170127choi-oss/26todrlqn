@@ -7,7 +7,7 @@ function safeParseJson(text) {
 }
 
 async function generateWithRetry(ai, baseParams) {
-  const modelName = 'gemini-3.8-flash';
+  const models = ['gemini-3.8-flash', 'gemini-3.8-pro'];
   let lastError = null;
 
   // 서버 혼잡(503) 시 3초, 6초, 9초 대기하며 최대 4번 자동 재시도
