@@ -6,32 +6,28 @@ function safeParseJson(text) {
   return JSON.parse(cleaned);
 }
 
-async function generateWithFallback(ai, baseParams) {
-  const primary = process.env.GEMINI_MODEL || 'gemini-3.8-flash-lite';
-  const modelsToTry = Array.from(new Set([primary, 'gemini-3.8-flash-lite', 'gemini-3.8-flash']));
-
+async function generateWithRetry(ai, baseParams) {
+  const modelName = 'gemini-3.8-flash';
   let lastError = null;
 
-  for (const modelName of modelsToTry) {
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        return await ai.models.generateContent({
-          ...baseParams,
-          model: modelName
-        });
-      } catch (err) {
-        lastError = err;
-        const msg = err?.message || '';
-        const isTemporary =
-          msg.includes('503') ||
-          msg.includes('429') ||
-          msg.includes('UNAVAILABLE') ||
-          msg.includes('high demand') ||
-          msg.includes('404');
+  // 서버 혼잡(503) 시 3초, 6초, 9초 대기하며 최대 4번 자동 재시도
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      return await ai.models.generateContent({
+        ...baseParams,
+        model: modelName
+      });
+    } catch (err) {
+      lastError = err;
+      const msg = err?.message || '';
+      const isBusy =
+        msg.includes('503') ||
+        msg.includes('429') ||
+        msg.includes('UNAVAILABLE') ||
+        msg.includes('high demand');
 
-        if (!isTemporary) throw err;
-        await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
-      }
+      if (!isBusy || attempt === 4) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 3000 * attempt));
     }
   }
   throw lastError;
@@ -48,7 +44,7 @@ export default async function handler(req, res) {
     const ai = new GoogleGenAI({ apiKey });
 
     if (mode === 'structure') {
-      const response = await generateWithFallback(ai, {
+      const response = await generateWithRetry(ai, {
         contents: [
           { inlineData: { data: pdfBase64, mimeType: 'application/pdf' } },
           `초등학교 평가 PDF입니다. 각 학생의 시험지가 몇 페이지부터 몇 페이지까지인지 구분하세요.
@@ -98,7 +94,7 @@ export default async function handler(req, res) {
 4. 다른 학생 문장과 표현이 겹치지 않게 작성하세요.
 ${existingDrafts?.length ? `[중복 회피 참고 문장]\n- ${existingDrafts.slice(-5).join('\n- ')}` : ''}`;
 
-      const response = await generateWithFallback(ai, {
+      const response = await generateWithRetry(ai, {
         contents: [
           { inlineData: { data: pdfBase64, mimeType: 'application/pdf' } },
           prompt
