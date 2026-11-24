@@ -1,5 +1,37 @@
 import { GoogleGenAI, Type } from '@google/genai';
 
+// 503(혼잡) 또는 429(요청 과다) 시 대기 재시도 후, 계속 막히면 예비 모델로 자동 전환
+async function generateWithFallback(ai, baseParams) {
+  const primary = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+  const modelsToTry = Array.from(new Set([primary, 'gemini-3.8-flash-lite', 'gemini-3.8-pro']));
+
+  let lastError = null;
+
+  for (const modelName of modelsToTry) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        return await ai.models.generateContent({
+          ...baseParams,
+          model: modelName
+        });
+      } catch (err) {
+        lastError = err;
+        const msg = err?.message || '';
+        const isTemporary =
+          msg.includes('503') ||
+          msg.includes('429') ||
+          msg.includes('UNAVAILABLE') ||
+          msg.includes('high demand') ||
+          msg.includes('404');
+
+        if (!isTemporary) throw err;
+        await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+      }
+    }
+  }
+  throw lastError;
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST만 지원합니다.' });
 
@@ -9,12 +41,10 @@ export default async function handler(req, res) {
   try {
     const { mode, pdfBase64, info, student, existingDrafts } = req.body;
     const ai = new GoogleGenAI({ apiKey });
-    const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
     // 1단계: 전체 PDF 구조 및 학생별 페이지 구간 찾기
     if (mode === 'structure') {
-      const response = await ai.models.generateContent({
-        model,
+      const response = await generateWithFallback(ai, {
         contents: [
           { inlineData: { data: pdfBase64, mimeType: 'application/pdf' } },
           `초등학교 평가 PDF입니다. 각 학생의 시험지가 몇 페이지부터 몇 페이지까지인지 구분하세요.
@@ -65,8 +95,7 @@ export default async function handler(req, res) {
 4. 다른 학생 문장과 표현이 겹치지 않게 작성하세요.
 ${existingDrafts?.length ? `[중복 회피 참고 문장]\n- ${existingDrafts.slice(-5).join('\n- ')}` : ''}`;
 
-      const response = await ai.models.generateContent({
-        model,
+      const response = await generateWithFallback(ai, {
         contents: [
           { inlineData: { data: pdfBase64, mimeType: 'application/pdf' } },
           prompt
