@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI 학생 성취도 분석 및 생기부 작성</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
+</head>
+<body class="bg-slate-50 text-slate-800">
+  <header class="bg-white border-b border-slate-200 py-5 mb-6">
+    <div class="max-w-5xl mx-auto px-4">
+      <h1 class="text-xl font-bold text-slate-900">AI 학생 성취도 분석 및 생활기록부 작성 도우미</h1>
+      <p class="text-sm text-slate-500 mt-1">평가 PDF를 업로드하면 학생별 시험지를 자동 구분해 채점·성취도 분석·생기부 초안을 생성합니다.</p>
+    </div>
+  </header>
+
+  <main class="max-w-5xl mx-auto px-4 space-y-6 pb-16">
+    <!-- 1. 평가 정보 -->
+    <section class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+      <h2 class="font-bold text-base mb-4">1. 평가 기본 정보</h2>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+        <div>
+          <label class="block text-slate-600 font-medium mb-1">학년</label>
+          <select id="grade" class="w-full border rounded-lg p-2.5">
+            <option>1학년</option><option>2학년</option><option>3학년</option>
+            <option>4학년</option><option selected>5학년</option><option>6학년</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-slate-600 font-medium mb-1">학기</label>
+          <select id="semester" class="w-full border rounded-lg p-2.5">
+            <option>1학기</option><option selected>2학기</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-slate-600 font-medium mb-1">과목</label>
+          <input id="subject" type="text" value="수학" class="w-full border rounded-lg p-2.5" />
+        </div>
+        <div>
+          <label class="block text-slate-600 font-medium mb-1">평가 영역</label>
+          <input id="domain" type="text" value="자료와 가능성" class="w-full border rounded-lg p-2.5" />
+        </div>
+        <div>
+          <label class="block text-slate-600 font-medium mb-1">평가 유형</label>
+          <input id="evalType" type="text" value="단원 평가" class="w-full border rounded-lg p-2.5" />
+        </div>
+        <div>
+          <label class="block text-slate-600 font-medium mb-1">성취기준 (선택)</label>
+          <input id="standards" type="text" placeholder="예: [6수05-01] 자료를 수집하여 그림그래프로..." class="w-full border rounded-lg p-2.5" />
+        </div>
+      </div>
+      <div class="mt-4 text-sm">
+        <label class="block text-slate-600 font-medium mb-1">평가 기준</label>
+        <input id="criteria" type="text" value="매우 잘함(개념을 정확히 이해하고 논리적 적용) / 잘함(핵심 개념 이해 및 기본 문제 해결) / 보통(부분적 이해) / 노력 요함(추가 학습 필요)" class="w-full border rounded-lg p-2.5" />
+      </div>
+    </section>
+
+    <!-- 2. PDF 업로드 -->
+    <section class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+      <h2 class="font-bold text-base mb-3">2. 학생 시험지 PDF 업로드</h2>
+      <div id="dropZone" class="border-2 border-dashed border-slate-300 rounded-xl p-8 text-center cursor-pointer hover:border-blue-500 hover:bg-blue-50 transition">
+        <p class="font-semibold text-slate-700">클릭하거나 PDF 파일을 이곳에 끌어다 놓으세요</p>
+        <p class="text-xs text-slate-500 mt-1">학생 여러 명이 합쳐진 대용량 PDF도 자동으로 학생별 페이지로 분할해 안전하게 분석합니다.</p>
+        <input id="fileInput" type="file" accept="application/pdf" class="hidden" />
+      </div>
+      <p id="fileInfo" class="text-sm font-medium text-blue-600 mt-3 hidden"></p>
+    </section>
+
+    <button id="startBtn" class="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white font-bold py-3.5 rounded-xl shadow-sm transition">
+      AI 성취도 분석 및 생활기록부 초안 생성 시작
+    </button>
+
+    <!-- 3. 진행 상황 -->
+    <section id="progressBox" class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm hidden">
+      <div class="flex justify-between text-sm font-semibold mb-2">
+        <span id="statusText">준비 중...</span>
+        <span id="percentText">0%</span>
+      </div>
+      <div class="w-full bg-slate-200 h-3 rounded-full overflow-hidden">
+        <div id="progressBar" class="bg-blue-600 h-full transition-all duration-300" style="width: 0%"></div>
+      </div>
+      <p id="errorText" class="text-sm text-red-600 mt-3 hidden"></p>
+    </section>
+
+    <!-- 4. 결과 목록 -->
+    <section id="resultSection" class="space-y-4 hidden">
+      <div class="bg-white p-5 rounded-xl border border-slate-200 flex flex-wrap justify-between items-center gap-3">
+        <div id="summaryText" class="text-sm font-semibold"></div>
+        <div class="flex gap-2">
+          <button id="copyAllBtn" class="px-4 py-2 text-sm font-semibold border rounded-lg hover:bg-slate-100">전체 문장 복사</button>
+          <button id="excelBtn" class="px-4 py-2 text-sm font-semibold bg-emerald-600 text-white rounded-lg hover:bg-emerald-700">엑셀(.xlsx) 다운로드</button>
+        </div>
+      </div>
+      <div id="studentList" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
+    </section>
+  </main>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
