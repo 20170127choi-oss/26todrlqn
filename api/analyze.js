@@ -1,9 +1,14 @@
 import { GoogleGenAI, Type } from '@google/genai';
 
-// 503(혼잡) 또는 429(요청 과다) 시 대기 재시도 후, 계속 막히면 예비 모델로 자동 전환
+function safeParseJson(text) {
+  if (!text) throw new Error('AI가 빈 응답을 반환했습니다.');
+  const cleaned = text.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+  return JSON.parse(cleaned);
+}
+
 async function generateWithFallback(ai, baseParams) {
-  const primary = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
-  const modelsToTry = Array.from(new Set([primary, 'gemini-3.8-flash-lite', 'gemini-3.8-pro']));
+  const primary = process.env.GEMINI_MODEL || 'gemini-3.8-flash-lite';
+  const modelsToTry = Array.from(new Set([primary, 'gemini-3.8-flash-lite', 'gemini-3.8-flash']));
 
   let lastError = null;
 
@@ -25,7 +30,7 @@ async function generateWithFallback(ai, baseParams) {
           msg.includes('404');
 
         if (!isTemporary) throw err;
-        await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+        await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
       }
     }
   }
@@ -42,13 +47,12 @@ export default async function handler(req, res) {
     const { mode, pdfBase64, info, student, existingDrafts } = req.body;
     const ai = new GoogleGenAI({ apiKey });
 
-    // 1단계: 전체 PDF 구조 및 학생별 페이지 구간 찾기
     if (mode === 'structure') {
       const response = await generateWithFallback(ai, {
         contents: [
           { inlineData: { data: pdfBase64, mimeType: 'application/pdf' } },
           `초등학교 평가 PDF입니다. 각 학생의 시험지가 몇 페이지부터 몇 페이지까지인지 구분하세요.
-          이름이 흐리거나 불명확하면 status를 "needs_review"로, 명확하면 "confirmed"로 표시하세요.`
+          이름이 흐리거나 안 보이면 student_name을 "미확인", status를 "needs_review"로 표시하세요.`
         ],
         config: {
           responseMimeType: 'application/json',
@@ -74,10 +78,9 @@ export default async function handler(req, res) {
           }
         }
       });
-      return res.status(200).json(JSON.parse(response.text));
+      return res.status(200).json(safeParseJson(response.text));
     }
 
-    // 2단계: 쪼개진 학생 1명의 미니 PDF 분석 및 생기부 초안 생성
     if (mode === 'student') {
       const prompt = `당신은 초등학교 교육과정 및 평가 분석 전문가입니다.
 제공된 시험지 PDF는 [${student.student_number || ''} ${student.student_name}] 학생의 답안지입니다.
@@ -132,7 +135,7 @@ ${existingDrafts?.length ? `[중복 회피 참고 문장]\n- ${existingDrafts.sl
           }
         }
       });
-      return res.status(200).json(JSON.parse(response.text));
+      return res.status(200).json(safeParseJson(response.text));
     }
 
     return res.status(400).json({ error: '잘못된 요청 모드입니다.' });
