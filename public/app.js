@@ -23,11 +23,13 @@ function setFile(file) {
 
 function uint8ToBase64(bytes) {
   let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
   return btoa(binary);
 }
 
-// 대용량 PDF라도 구조 파악용 경량 PDF(최대 30페이지 단위)로 안전하게 변환
 async function buildSlicePdfBase64(srcDoc, startPage1Based, endPage1Based) {
   const newDoc = await PDFDocument.create();
   const total = srcDoc.getPageCount();
@@ -38,7 +40,13 @@ async function buildSlicePdfBase64(srcDoc, startPage1Based, endPage1Based) {
   const copied = await newDoc.copyPages(srcDoc, indices);
   copied.forEach((p) => newDoc.addPage(p));
   const bytes = await newDoc.save();
-  return uint8ToBase64(bytes);
+
+  // Vercel Serverless Function 최대 전송 크기(4.5MB) 사전 검사
+  const sizeMb = bytes.byteLength / (1024 * 1024);
+  if (sizeMb > 3.2) {
+    throw new Error(`선택하신 PDF의 ${startPage1Based}~${endPage1Based}페이지 용량(${sizeMb.toFixed(1)}MB)이 너무 큽니다. 스캔 해상도를 낮추거나 페이지 수를 줄여 주세요.`); } return uint8ToBase64(bytes); }  // 서버 응답이 JSON이 아닐 때(Vercel 504 타임아웃, 413 용량초과 등) 원인 정확히 읽기 async function postAnalyze(payload) { const res = await fetch('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });  const rawText = await res.text(); let data; try { data = JSON.parse(rawText); } catch { if (res.status === 413) throw new Error('전송 용량 초과(413): 스캔 해상도가 너무 높습니다.'); if (res.status === 504) throw new Error('서버 응답 시간 초과(504): AI 분석이 60초를 넘겼습니다. 다시 시도해 주세요.'); throw new Error(`서버 오류(${res.status}): ${rawText.slice(0, 120)}`); }  if (!res.ok) { throw new Error(data.error \vert{}\vert{} `요청 실패 (${res.status})`);
+  }
+  return data;
 }
 
 $('startBtn').onclick = async () => {
@@ -61,31 +69,36 @@ $('startBtn').onclick = async () => {
   };
 
   try {
-    updateProgress(10, '1단계: PDF 페이지 구조를 읽고 학생별 시험지 구간을 파악하는 중...');
+    updateProgress(5, '1단계: PDF 파일을 불러오는 중...');
     const arrayBuffer = await selectedFile.arrayBuffer();
     const srcDoc = await PDFDocument.load(arrayBuffer);
     const totalPages = srcDoc.getPageCount();
 
-    // 15페이지씩 끊어서 학생 구간 탐색 (대용량 페이로드 초과 방지)
+    // 스캔 고화질 PDF도 터지지 않도록 3페이지씩 잘라서 학생 구간 탐색
     let allStudents = [];
-    const chunkPages = 15;
+    const chunkPages = 3;
     for (let p = 1; p <= totalPages; p += chunkPages) {
       const endP = Math.min(totalPages, p + chunkPages - 1);
+      const scanPct = 5 + Math.round((endP / totalPages) * 20);
+      updateProgress(scanPct, `1단계: 학생별 시험지 구간 확인 중... (${endP}/${totalPages}페이지)`);
+
       const sliceBase64 = await buildSlicePdfBase64(srcDoc, p, endP);
-      const res = await fetch('/api/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: 'structure', pdfBase64: sliceBase64 })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      const data = await postAnalyze({ mode: 'structure', pdfBase64: sliceBase64 });
 
       (data.students || []).forEach((st) => {
-        allStudents.push({
-          ...st,
-          page_start: p + st.page_start - 1,
-          page_end: p + st.page_end - 1
-        });
+        const realStart = p + st.page_start - 1;
+        const realEnd = p + st.page_end - 1;
+        // 앞 청크와 같은 학생이 이어지는 경우 페이지 구간 합치기
+        const prev = allStudents[allStudents.length - 1];
+        if (prev && prev.student_name === st.student_name && st.student_name !== '미확인') {
+          prev.page_end = realEnd;
+        } else {
+          allStudents.push({
+            ...st,
+            page_start: realStart,
+            page_end: realEnd
+          });
+        }
       });
     }
 
@@ -97,34 +110,8 @@ $('startBtn').onclick = async () => {
     // 2단계: 학생 1명씩 해당 페이지만 쪼개서 AI 분석
     for (let i = 0; i < allStudents.length; i++) {
       const st = allStudents[i];
-      const pct = 20 + Math.round(((i + 1) / allStudents.length) * 80);
-      updateProgress(pct, `2단계: [${st.student_name}] 학생 답안 채점 및 생기부 작성 중... (${i + 1}/${allStudents.length}명)`);
-
-      const studentPdfBase64 = await buildSlicePdfBase64(srcDoc, st.page_start, st.page_end);
-      const res = await fetch('/api/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          mode: 'student',
-          pdfBase64: studentPdfBase64,
-          info,
-          student: st,
-          existingDrafts
-        })
-      });
-      const analysis = await res.json();
-      if (!res.ok) throw new Error(`${st.student_name} 분석 실패: ${analysis.error}`);
-
-      existingDrafts.push(analysis.record_draft);
-      const recordItem = { ...st, ...analysis };
-      results.push(recordItem);
-      appendStudentCard(recordItem);
-      $('summaryText').textContent = `총 ${allStudents.length}명 중 ${results.length}명 분석 완료`;
-    }
-
-    updateProgress(100, '모든 학생의 성취도 분석 및 생활기록부 초안 생성이 완료되었습니다!');
-  } catch (err) {
-    $('errorText').textContent = `오류: ${err.message}`;
+      const pct = 25 + Math.round(((i + 1) / allStudents.length) * 75);
+      updateProgress(pct, `2단계: [${st.student_name}] 학생 채점 및 생기부 작성 중... (${i + 1}/${allStudents.length}명)`);  const studentPdfBase64 = await buildSlicePdfBase64(srcDoc, st.page_start, st.page_end); const analysis = await postAnalyze({ mode: 'student', pdfBase64: studentPdfBase64, info, student: st, existingDrafts });  existingDrafts.push(analysis.record_draft); const recordItem = { ...st, ...analysis }; results.push(recordItem); appendStudentCard(recordItem); $('summaryText').textContent = `총 ${allStudents.length}명 중 ${results.length}명 분석 완료`; }  updateProgress(100, '모든 학생의 성취도 분석 및 생활기록부 초안 생성이 완료되었습니다!'); } catch (err) { $('errorText').textContent = `오류: ${err.message}`;
     $('errorText').classList.remove('hidden');
   } finally {
     $('startBtn').disabled = false;
@@ -132,8 +119,7 @@ $('startBtn').onclick = async () => {
 };
 
 function updateProgress(pct, text) {
-  $('progressBar').style.width = `${pct}%`;
-  $('percentText').textContent = `${pct}%`;
+  $('progressBar').style.width = `${pct}\%`; $('percentText').textContent = `${pct}%`;
   $('statusText').textContent = text;
 }
 
@@ -162,39 +148,4 @@ function appendStudentCard(st) {
     <textarea class="draft-box w-full border rounded-lg p-3 text-sm leading-relaxed" rows="4">${st.record_draft}</textarea>
     <details class="text-xs text-slate-500">
       <summary class="cursor-pointer font-medium hover:text-slate-800">문항별 채점 근거 보기</summary>
-      <pre class="mt-2 whitespace-pre-wrap bg-slate-50 p-2.5 rounded border text-slate-600">${qDetails}</pre>
-    </details>
-    <div class="flex justify-end">
-      <button class="copy-btn px-3 py-1.5 text-xs font-semibold border rounded-lg hover:bg-slate-100">문장 복사</button>
-    </div>
-  `;
-
-  card.querySelector('.draft-box').oninput = (e) => { st.record_draft = e.target.value; };
-  card.querySelector('.copy-btn').onclick = () => {
-    navigator.clipboard.writeText(st.record_draft);
-    alert(`${st.student_name} 학생 문장이 복사되었습니다.`);
-  };
-  $('studentList').appendChild(card);
-}
-
-$('copyAllBtn').onclick = () => {
-  const text = results.map((r) => `[${r.student_number ? r.student_number + '번 ' : ''}${r.student_name}]\n${r.record_draft}`).join('\n\n');
-  navigator.clipboard.writeText(text);
-  alert('전체 학생의 생활기록부 문장이 복사되었습니다.');
-};
-
-$('excelBtn').onclick = () => {
-  const rows = results.map((r) => ({
-    '번호': r.student_number || '',
-    '이름': r.student_name,
-    '총점': `${r.total_score}/${r.max_score}`,
-    '성취수준': r.achievement_level,
-    '강점': r.strengths,
-    '보완점': r.improvements,
-    '생활기록부 초안': r.record_draft
-  }));
-  const ws = XLSX.utils.json_to_sheet(rows);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, '생활기록부');
-  XLSX.writeFile(wb, '학생_성취도_및_생활기록부.xlsx');
-};
+      <pre class="mt-2 whitespace-pre-wrap bg
